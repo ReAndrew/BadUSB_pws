@@ -1,31 +1,21 @@
 param (
-    [string]$mode = "kill" # Если режим не указан, по умолчанию "kill"
+    [string]$mode = "kill"
 )
 
-# 1. Мгновенная проверка интернета
 if (-not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) { exit }
 
-# 2. Идентификация и тегирование
 $currentTag = "WindowDance_Instance"
 $host.ui.RawUI.WindowTitle = $currentTag
 
-# 3. Функция для закрытия всех окон WindowDance
 function Stop-AllDances {
     [void](Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { 
         $_.MainWindowTitle -eq $currentTag -and $_.Id -ne $PID 
     } | Stop-Process -Force)
 }
 
-# 4. Обработка режима "kill" (вызывается если аргумент пуст или mode=kill)
-if ($mode -eq "kill" -or $mode -eq "stop" -or [string]::IsNullOrEmpty($mode)) {
-    Stop-AllDances
-    exit
-}
-
-# Если идем дальше, значит режим выбран. Сначала чистим старые копии.
+if ($mode -eq "kill" -or $mode -eq "stop") { Stop-AllDances; exit }
 Stop-AllDances
 
-# 5. Приоритеты и API (только если летим дальше)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 try { ([System.Diagnostics.Process]::GetCurrentProcess()).PriorityClass = if($isAdmin){"High"}else{"AboveNormal"} } catch{}
 
@@ -37,6 +27,7 @@ public class WinApi {
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtInfo);
     public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
@@ -44,19 +35,17 @@ Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
 
 $SWP_FLAGS = 0x0001 -bor 0x0004 -bor 0x0010 -bor 0x4000
 $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$lastScan = 0
-$cachedWindows = @()
+$lastScan = 0; $cachedWindows = @()
 
-# --- ТАНЦЫ ---
+# --- РЕЖИМЫ ---
 
+# 1. Physics (Рогатка)
 if ($mode -eq "physics") {
     $gravity = 0.8; $friction = 0.98; $bounce = 0.7; $winStates = @{}
     while($true) {
         if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
         $isMouseDown = [WinApi]::GetAsyncKeyState(0x01) -ne 0
-        if ([Environment]::TickCount -gt $lastScan + 2000) {
-            $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount
-        }
+        if ([Environment]::TickCount -gt $lastScan + 2000) { $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount }
         foreach ($p in $cachedWindows) {
             try {
                 $hwnd = $p.MainWindowHandle; if ($hwnd -eq 0) { continue }
@@ -64,9 +53,7 @@ if ($mode -eq "physics") {
                 $id = $hwnd.ToString()
                 if (-not $winStates.ContainsKey($id)) { $winStates[$id] = @{ vx=0; vy=0; oldX=$rect.Left; oldY=$rect.Top; isFlying=$false } }
                 $state = $winStates[$id]
-                if ($rect.Left -ne $state.oldX -or $rect.Top -ne $state.oldY) {
-                    if ($isMouseDown) { $state.vx = ($rect.Left - $state.oldX) * 2.2; $state.vy = ($rect.Top - $state.oldY) * 2.2; $state.isFlying = $true }
-                }
+                if ($rect.Left -ne $state.oldX -or $rect.Top -ne $state.oldY) { if ($isMouseDown) { $state.vx = ($rect.Left - $state.oldX) * 2.2; $state.vy = ($rect.Top - $state.oldY) * 2.2; $state.isFlying = $true } }
                 if ($state.isFlying -and -not $isMouseDown) {
                     $state.vy += $gravity; $state.vx *= $friction; $state.vy *= $friction
                     $nx = $rect.Left + $state.vx; $ny = $rect.Top + $state.vy
@@ -83,17 +70,18 @@ if ($mode -eq "physics") {
     }
 }
 
+# 2. Circle (Хоровод)
 elseif ($mode -eq "circle") {
-    $angleOffset = 0; $cx = $workArea.Width / 2; $cy = $workArea.Height / 2; $radius = [Math]::Min($workArea.Width, $workArea.Height) / 3
+    $angleOffset = 0; $cx = $workArea.Width/2; $cy = $workArea.Height/2; $radius = [Math]::Min($workArea.Width, $workArea.Height)/3
     while($true) {
         if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
         if ([Environment]::TickCount -gt $lastScan + 2000) { $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount }
         $count = $cachedWindows.Count
-        for ($i = 0; $i -lt $count; $i++) {
+        for ($i=0; $i -lt $count; $i++) {
             try {
                 $hwnd = $cachedWindows[$i].MainWindowHandle; if ($hwnd -eq 0) { continue }
-                $angle = ($i / $count) * [Math]::PI * 2 + $angleOffset
-                $nx = $cx + [Math]::Cos($angle) * $radius - 200; $ny = $cy + [Math]::Sin($angle) * $radius - 150
+                $angle = ($i/$count)*[Math]::PI*2 + $angleOffset
+                $nx = $cx + [Math]::Cos($angle)*$radius - 200; $ny = $cy + [Math]::Sin($angle)*$radius - 150
                 [void][WinApi]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
             } catch {continue}
         }
@@ -101,19 +89,50 @@ elseif ($mode -eq "circle") {
     }
 }
 
+# 3. Sinus (Прыжки)
 elseif ($mode -eq "sinus") {
-    $t = 0; $jumpH = $workArea.Height / 3
+    $t = 0; $jumpH = $workArea.Height/3
     while($true) {
         if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
         if ([Environment]::TickCount -gt $lastScan + 2000) { $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount }
         foreach ($p in $cachedWindows) {
             try {
                 $hwnd = $p.MainWindowHandle; if ($hwnd -eq 0) { continue }
-                $phase = $p.Id * 0.1; $factor = [Math]::Pow([Math]::Abs([Math]::Sin($t + $phase)), 1.3)
-                $nx = ($p.Id * 150) % ($workArea.Width - 400); $ny = ($workArea.Height - 350) - ($factor * $jumpH)
+                $phase = $p.Id*0.1; $factor = [Math]::Pow([Math]::Abs([Math]::Sin($t + $phase)), 1.3)
+                $nx = ($p.Id*150)%($workArea.Width-400); $ny = ($workArea.Height-350)-($factor*$jumpH)
                 [void][WinApi]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
             } catch {continue}
         }
         $t += 0.08; [System.Threading.Thread]::Sleep(10)
+    }
+}
+
+# 4. Caps (Танец клавиш)
+elseif ($mode -eq "caps") {
+    $keys = @(0x14, 0x90, 0x91) # Caps, Num, Scroll
+    while($true) {
+        if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
+        foreach ($key in $keys) {
+            [WinApi]::keybd_event($key, 0, 0, [UIntPtr]::Zero)
+            [WinApi]::keybd_event($key, 0, 0x0002, [UIntPtr]::Zero)
+            [System.Threading.Thread]::Sleep(100)
+        }
+    }
+}
+
+# 5. Chaos (Землетрясение)
+elseif ($mode -eq "chaos") {
+    while($true) {
+        if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
+        if ([Environment]::TickCount -gt $lastScan + 2000) { $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount }
+        foreach ($p in $cachedWindows) {
+            try {
+                $hwnd = $p.MainWindowHandle; if ($hwnd -eq 0) { continue }
+                $rx = (Get-Random -Min -10 -Max 11); $ry = (Get-Random -Min -10 -Max 11)
+                $rect = New-Object WinApi+RECT; [void][WinApi]::GetWindowRect($hwnd, [ref]$rect)
+                [void][WinApi]::SetWindowPos($hwnd, 0, $rect.Left + $rx, $rect.Top + $ry, 0, 0, $SWP_FLAGS)
+            } catch {continue}
+        }
+        [System.Threading.Thread]::Sleep(5)
     }
 }
