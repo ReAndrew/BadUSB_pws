@@ -1,55 +1,41 @@
+# Импорт функции для управления окнами
 $code = @"
 using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using System.Text;
-
-public class WindowManager {
-    // Импорт функций Win32 API
+public class WinApi {
     [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    public static extern int GetWindowTextLength(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
-
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-    public static List<IntPtr> GetVisibleWindows() {
-        List<IntPtr> windows = new List<IntPtr>();
-        EnumWindows(delegate (IntPtr hWnd, IntPtr lParam) {
-            if (IsWindowVisible(hWnd) && GetWindowTextLength(hWnd) > 0) {
-                windows.Add(hWnd);
-            }
-            return true;
-        }, IntPtr.Zero);
-        return windows;
-    }
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 }
 "@
-
 Add-Type -TypeDefinition $code
 
+# Константы для SetWindowPos (не менять размер, не менять Z-порядок)
+$SWP_NOSIZE = 0x0001
+$SWP_NOZORDER = 0x0004
 
-$allWindows = [WindowManager]::GetVisibleWindows()
+$amplitude = 100 # Высота волны в пикселях
+$frequency = 0.1 # Скорость/частота волны
+$t = 0
 
-$x = 0
-$y = 0
-$step = 40 # Смещение для каждого следующего окна
-
-foreach ($hwnd in $allWindows) {
+while($true) {
+    # Получаем все процессы, у которых есть заголовок окна
+    $processes = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 }
     
-    [WindowManager]::MoveWindow($hwnd, $x, $y, 800, 600, $true)
+    foreach ($p in $processes) {
+        $hwnd = $p.MainWindowHandle
+        
+        # Рассчитываем новую позицию Y по синусоиде
+        # Чтобы окна не слиплись, добавим смещение на основе ID процесса
+        $yOffset = [Math]::Sin($t + $p.Id) * $amplitude
+        $newY = 400 + $yOffset
+        
+        # Двигаем окно (X оставляем старым или тоже анимируем)
+        # В данном примере X плавно ползет вправо
+        $newX = ($t * 10 + ($p.Id % 500)) % 1500
+        
+        [WinApi]::SetWindowPos($hwnd, [IntPtr]::Zero, [int]$newX, [int]$newY, 0, 0, ($SWP_NOSIZE -bor $SWP_NOZORDER))
+    }
     
-    $x += $step
-    $y += $step
-    
-    
-    if ($x -gt 1000) { $x = 0; $y = 0 }
+    $t += $frequency
+    Start-Sleep -Milliseconds 10 # Задержка для плавности
 }
-
-Write-Host "Готово! Все окна (всего: $($allWindows.Count)) были перемещены."
