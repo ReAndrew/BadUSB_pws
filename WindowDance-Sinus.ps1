@@ -1,41 +1,54 @@
-# Импорт функции для управления окнами
+# Приоритеты и права
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$proc = [System.Diagnostics.Process]::GetCurrentProcess()
+try { $proc.PriorityClass = if($isAdmin){"High"}else{"AboveNormal"} } catch{}
+
+Add-Type -AssemblyName System.Windows.Forms
 $code = @"
 using System;
 using System.Runtime.InteropServices;
 public class WinApi {
-    [DllImport("user32.dll")]
-    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+    public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
 Add-Type -TypeDefinition $code
 
-# Константы для SetWindowPos (не менять размер, не менять Z-порядок)
-$SWP_NOSIZE = 0x0001
-$SWP_NOZORDER = 0x0004
+$SWP_FLAGS = 0x0001 -bor 0x0004 -bor 0x0010 -bor 0x4000
+$workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$floor = $workArea.Height
+$jumpHeight = $workArea.Height / 3
 
-$amplitude = 100 # Высота волны в пикселях
-$frequency = 0.1 # Скорость/частота волны
 $t = 0
+$lastScan = 0
+$cachedWindows = @()
 
 while($true) {
-    # Получаем все процессы, у которых есть заголовок окна
-    $processes = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 }
-    
-    foreach ($p in $processes) {
-        $hwnd = $p.MainWindowHandle
-        
-        # Рассчитываем новую позицию Y по синусоиде
-        # Чтобы окна не слиплись, добавим смещение на основе ID процесса
-        $yOffset = [Math]::Sin($t + $p.Id) * $amplitude
-        $newY = 400 + $yOffset
-        
-        # Двигаем окно (X оставляем старым или тоже анимируем)
-        # В данном примере X плавно ползет вправо
-        $newX = ($t * 10 + ($p.Id % 500)) % 1500
-        
-        [WinApi]::SetWindowPos($hwnd, [IntPtr]::Zero, [int]$newX, [int]$newY, 0, 0, ($SWP_NOSIZE -bor $SWP_NOZORDER))
+    if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
+    $now = [Environment]::TickCount
+
+    if ($now -gt $lastScan + 2000) {
+        $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }
+        $lastScan = $now
     }
-    
-    $t += $frequency
-    Start-Sleep -Milliseconds 10 # Задержка для плавности
+
+    foreach ($p in $cachedWindows) {
+        try {
+            $hwnd = $p.MainWindowHandle
+            if ($hwnd -eq 0) { continue }
+
+            $phase = $p.Id * 0.1
+            # Формула прыжка с эффектом гравитации
+            $jumpFactor = [Math]::Pow([Math]::Abs([Math]::Sin($t + $phase)), 1.3)
+            
+            $nx = ($p.Id * 150) % ($workArea.Width - 400)
+            $ny = ($floor - 350) - ($jumpFactor * $jumpHeight)
+
+            [WinApi]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
+        } catch { continue }
+    }
+    $t += 0.08
+    [System.Threading.Thread]::Sleep(10)
 }
