@@ -1,45 +1,55 @@
-Add-Type -AssemblyName System.Windows.Forms
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$centerX = $screen.Width / 2
-$centerY = $screen.Height / 2
-$radius = [Math]::Min($screen.Width, $screen.Height) / 3 
-$offset = Read-Host "Offset: " 
-$delay = Read-Host "Delay: " 
+# Приоритеты и права
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$proc = [System.Diagnostics.Process]::GetCurrentProcess()
+try { $proc.PriorityClass = if($isAdmin){"High"}else{"AboveNormal"} } catch{}
 
+Add-Type -AssemblyName System.Windows.Forms
 $code = @"
 using System;
 using System.Runtime.InteropServices;
 public class WinApi {
-    [DllImport("user32.dll")]
-    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+    public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
 Add-Type -TypeDefinition $code
 
-$SWP_NOSIZE = 0x0001
-$SWP_NOZORDER = 0x0004
-$angleOffset = 0 # Начальный угол вращения
+$SWP_FLAGS = 0x0001 -bor 0x0004 -bor 0x0010 -bor 0x4000
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$cx = $screen.Width / 2
+$cy = $screen.Height / 2
+$radius = [Math]::Min($screen.Width, $screen.Height) / 3
+
+$angleOffset = 0
+$lastScan = 0
+$cachedWindows = @()
 
 while($true) {
-    # Берем процессы с окнами, исключая сам рабочий стол и пустые заголовки
-    $processes = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -ne "" }
-    $count = $processes.Count
+    if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
+    $now = [Environment]::TickCount
 
+    if ($now -gt $lastScan + 2000) {
+        $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }
+        $lastScan = $now
+    }
+
+    $count = $cachedWindows.Count
     if ($count -gt 0) {
         for ($i = 0; $i -lt $count; $i++) {
-            $hwnd = $processes[$i].MainWindowHandle
-            
-            # Вычисляем угол для конкретного окна (равномерно по кругу)
-            $angle = ($i / $count) * [Math]::PI * 2 + $angleOffset
-            
-            # Координаты X и Y
-            $newX = $centerX + [Math]::Cos($angle) * $radius - 200 # -200 чтобы центр окна был в точке
-            $newY = $centerY + [Math]::Sin($angle) * $radius - 150 # -150 коррекция высоты
-            
-            [WinApi]::SetWindowPos($hwnd, [IntPtr]::Zero, [int]$newX, [int]$newY, 0, 0, ($SWP_NOSIZE -bor $SWP_NOZORDER))
+            try {
+                $hwnd = $cachedWindows[$i].MainWindowHandle
+                if ($hwnd -eq 0) { continue }
+
+                $angle = ($i / $count) * [Math]::PI * 2 + $angleOffset
+                $nx = $cx + [Math]::Cos($angle) * $radius - 200
+                $ny = $cy + [Math]::Sin($angle) * $radius - 150
+
+                [WinApi]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
+            } catch { continue }
         }
     }
-    
-    $angleOffset += $offset
-    Start-Sleep -Milliseconds $delay
+    $angleOffset += 0.04
+    [System.Threading.Thread]::Sleep(10)
 }
