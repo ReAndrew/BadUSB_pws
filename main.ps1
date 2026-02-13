@@ -1,16 +1,16 @@
 # --- НАСТРОЙКИ МЕНЮ ---
 # Просто добавь новый элемент в этот массив, чтобы расширить меню
 $MenuItems = @(
-    [PSCustomObject]@{ Title = "Разноцветные огоньки";  Action = { CapsLock-Dance } }
-    [PSCustomObject]@{ Title = "Озвучить текст";        Action = { Clean-TempFiles } }
-    [PSCustomObject]@{ Title = "Перемещение окон";      Action = { Wndows-Dance } }
-    [PSCustomObject]@{ Title = "SNDTag/m";              Action = { SNDTag-m } }
+    [PSCustomObject]@{ Title = "CAPS_DANCE";            Action = { CapsLock-Dance } }
+    [PSCustomObject]@{ Title = "WindowDance_Physics";   Action = { WinDance_Physics } }
+    [PSCustomObject]@{ Title = "WindowDance_Circle";    Action = { WinDance_Circle } }
+    [PSCustomObject]@{ Title = "WindowDance_Sinus";     Action = { WinDance_Sinus } }
 )
 
 # --- БЛОКИ КОДА (ФУНКЦИИ) ---
 # Здесь ты прописываешь логику для каждого пункта
 function CapsLock-Dance {
-    #iem / iex
+
 }
 
 function Clean-TempFiles {
