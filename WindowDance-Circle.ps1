@@ -1,4 +1,4 @@
-# Приоритеты и права
+# Заглушаем установку приоритета
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $proc = [System.Diagnostics.Process]::GetCurrentProcess()
 try { $proc.PriorityClass = if($isAdmin){"High"}else{"AboveNormal"} } catch{}
@@ -14,7 +14,7 @@ public class WinApi {
     public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
-Add-Type -TypeDefinition $code
+Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
 
 $SWP_FLAGS = 0x0001 -bor 0x0004 -bor 0x0010 -bor 0x4000
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -46,10 +46,11 @@ while($true) {
                 $nx = $cx + [Math]::Cos($angle) * $radius - 200
                 $ny = $cy + [Math]::Sin($angle) * $radius - 150
 
-                [WinApi]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
+                # Используем [void] чтобы убрать True/False
+                [void][WinApi]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
             } catch { continue }
         }
     }
-    $angleOffset += 0.5
-    [System.Threading.Thread]::Sleep(1)
+    $angleOffset += 0.04
+    [System.Threading.Thread]::Sleep(10)
 }
