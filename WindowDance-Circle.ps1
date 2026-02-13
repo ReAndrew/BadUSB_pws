@@ -50,6 +50,6 @@ while($true) {
             } catch { continue }
         }
     }
-    $angleOffset += 0.09
+    $angleOffset += 0.5
     [System.Threading.Thread]::Sleep(1)
 }
