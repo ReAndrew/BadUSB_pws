@@ -1,4 +1,3 @@
-# Приоритеты и права
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $proc = [System.Diagnostics.Process]::GetCurrentProcess()
 try { $proc.PriorityClass = if($isAdmin){"High"}else{"AboveNormal"} } catch{}
@@ -14,7 +13,7 @@ public class WinApi {
     public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
-Add-Type -TypeDefinition $code
+Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
 
 $SWP_FLAGS = 0x0001 -bor 0x0004 -bor 0x0010 -bor 0x4000
 $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
@@ -40,13 +39,13 @@ while($true) {
             if ($hwnd -eq 0) { continue }
 
             $phase = $p.Id * 0.1
-            # Формула прыжка с эффектом гравитации
             $jumpFactor = [Math]::Pow([Math]::Abs([Math]::Sin($t + $phase)), 1.3)
             
             $nx = ($p.Id * 150) % ($workArea.Width - 400)
             $ny = ($floor - 350) - ($jumpFactor * $jumpHeight)
 
-            [WinApi]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
+            # [void] отключает вывод результата операции в консоль
+            [void][WinApi]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
         } catch { continue }
     }
     $t += 0.08
