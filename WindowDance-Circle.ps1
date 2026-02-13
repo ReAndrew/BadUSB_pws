@@ -1,11 +1,11 @@
-# Подключаем библиотеку для работы с формами (нужна для координат экрана)
 Add-Type -AssemblyName System.Windows.Forms
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $centerX = $screen.Width / 2
 $centerY = $screen.Height / 2
-$radius = [Math]::Min($screen.Width, $screen.Height) / 3 # Радиус — треть от размера экрана
+$radius = [Math]::Min($screen.Width, $screen.Height) / 3 
+$offset = Read-Host "Offset: " 
+$delay = Read-Host "Delay: " 
 
-# Импорт WinApi для движения окон
 $code = @"
 using System;
 using System.Runtime.InteropServices;
@@ -40,6 +40,6 @@ while($true) {
         }
     }
     
-    $angleOffset += 0.05 # Скорость вращения круга
-    Start-Sleep -Milliseconds 20
+    $angleOffset += $offset
+    Start-Sleep -Milliseconds $delay
 }
