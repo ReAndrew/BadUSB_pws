@@ -1,29 +1,31 @@
 param (
-    [string]$mode = "physics" # По умолчанию включаем физику
+    [string]$mode = "kill" # Если режим не указан, по умолчанию "kill"
 )
 
-# --- БЛОК УПРАВЛЕНИЯ ПРОЦЕССАМИ ---
-# Устанавливаем тег текущего процесса, чтобы его можно было найти
+# 1. Мгновенная проверка интернета
+if (-not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) { exit }
+
+# 2. Идентификация и тегирование
 $currentTag = "WindowDance_Instance"
 $host.ui.RawUI.WindowTitle = $currentTag
 
-# Функция остановки всех копий
+# 3. Функция для закрытия всех окон WindowDance
 function Stop-AllDances {
-    Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { 
+    [void](Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { 
         $_.MainWindowTitle -eq $currentTag -and $_.Id -ne $PID 
-    } | Stop-Process -Force
+    } | Stop-Process -Force)
 }
 
-# Если выбран режим остановки - просто убиваем процессы и выходим
-if ($mode -eq "stop") {
+# 4. Обработка режима "kill" (вызывается если аргумент пуст или mode=kill)
+if ($mode -eq "kill" -or $mode -eq "stop" -or [string]::IsNullOrEmpty($mode)) {
     Stop-AllDances
     exit
 }
 
-# Перед запуском нового режима останавливаем старые
+# Если идем дальше, значит режим выбран. Сначала чистим старые копии.
 Stop-AllDances
 
-# --- ПОДГОТОВКА (ПРИОРИТЕТЫ И API) ---
+# 5. Приоритеты и API (только если летим дальше)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 try { ([System.Diagnostics.Process]::GetCurrentProcess()).PriorityClass = if($isAdmin){"High"}else{"AboveNormal"} } catch{}
 
@@ -45,7 +47,7 @@ $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $lastScan = 0
 $cachedWindows = @()
 
-# --- ЛОГИКА РЕЖИМОВ ---
+# --- ТАНЦЫ ---
 
 if ($mode -eq "physics") {
     $gravity = 0.8; $friction = 0.98; $bounce = 0.7; $winStates = @{}
@@ -85,9 +87,7 @@ elseif ($mode -eq "circle") {
     $angleOffset = 0; $cx = $workArea.Width / 2; $cy = $workArea.Height / 2; $radius = [Math]::Min($workArea.Width, $workArea.Height) / 3
     while($true) {
         if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
-        if ([Environment]::TickCount -gt $lastScan + 2000) {
-            $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount
-        }
+        if ([Environment]::TickCount -gt $lastScan + 2000) { $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount }
         $count = $cachedWindows.Count
         for ($i = 0; $i -lt $count; $i++) {
             try {
@@ -105,9 +105,7 @@ elseif ($mode -eq "sinus") {
     $t = 0; $jumpH = $workArea.Height / 3
     while($true) {
         if ([WinApi]::GetAsyncKeyState(0x1B) -ne 0) { break }
-        if ([Environment]::TickCount -gt $lastScan + 2000) {
-            $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount
-        }
+        if ([Environment]::TickCount -gt $lastScan + 2000) { $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }; $lastScan = [Environment]::TickCount }
         foreach ($p in $cachedWindows) {
             try {
                 $hwnd = $p.MainWindowHandle; if ($hwnd -eq 0) { continue }
