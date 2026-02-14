@@ -25,15 +25,6 @@ To use these in your HID device, wrap the commands in DuckyScript or your device
 3. `STRING powershell -w h -NoP -Ep Bypass -c "YOUR_PAYLOAD_HERE"`
 4. `ENTER`
 
-## Payload Examples
-
-| Payload | Description |
-|---------|-------------|
-| `Download & Execute` | Downloads a remote script and runs it in memory. |
-| `Exfil WiFi` | Extracts saved WiFi passwords and sends them to a webhook. |
-| `System Info` | Gathers hardware and OS details quickly. |
-| `Reverse Shell` | Simple one-liner for a remote connection (use for testing). |
-
 ## Prerequisites
 
 - Target OS: Windows 10/11
@@ -46,7 +37,3 @@ Contributions are welcome! If you have a clever one-liner or a new script:
 1. Fork the repo.
 2. Create your feature branch.
 3. Submit a Pull Request.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
