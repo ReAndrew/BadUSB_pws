@@ -1,258 +1,222 @@
-# --- 1. C# ЯДРО: БЫСТРЫЙ АНАЛИЗ И WINAPI ---
-$code = @'
-using System;
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
-
-namespace WindowPhysics {
-    public static class Utils {
-        [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-        [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-        [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
-        
-        [StructLayout(LayoutKind.Sequential)] 
-        public struct RECT { public int Left, Top, Right, Bottom; }
-
-        // Метод расчета массы: Размер + Энтропия цвета (насколько "шумное" окно)
-        public static float CalculateMass(Bitmap bmp, int samplesX, int samplesY) {
-            if (bmp == null) return 10f;
-            int w = bmp.Width; int h = bmp.Height;
-            
-            // Прямой доступ к памяти изображения (в 100 раз быстрее GetPixel)
-            BitmapData bData = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            int bytes = Math.Abs(bData.Stride) * h;
-            byte[] rgbValues = new byte[bytes];
-            Marshal.Copy(bData.Scan0, rgbValues, 0, bytes);
-            bmp.UnlockBits(bData);
-
-            long totalDiff = 0;
-            int stepX = Math.Max(1, w / samplesX);
-            int stepY = Math.Max(1, h / samplesY);
-            int count = 0;
-
-            // Проход по сетке пикселей
-            for (int x = stepX; x < w; x += stepX) {
-                for (int y = 0; y < h; y += stepY) {
-                    int idx = (y * bData.Stride) + (x * 4);
-                    int prevIdx = (y * bData.Stride) + ((x - stepX) * 4);
-                    
-                    // Сумма разницы цветов (B+G+R) между соседними точками
-                    totalDiff += Math.Abs(rgbValues[idx] - rgbValues[prevIdx]) +       
-                                 Math.Abs(rgbValues[idx + 1] - rgbValues[prevIdx + 1]) + 
-                                 Math.Abs(rgbValues[idx + 2] - rgbValues[prevIdx + 2]);
-                    count++;
-                }
-            }
-            
-            // Формула веса: Площадь + (Разнообразие цветов * коэффициент)
-            float areaMass = (float)(w * h) / 10000f; 
-            float diversityMass = count > 0 ? (float)totalDiff / count : 0;
-            
-            return Math.Max(10.0f, areaMass + (diversityMass * 3.0f)); 
-        }
-    }
-}
-'@
-
-# Компиляция (защита от повторной загрузки)
-if (-not ([System.Management.Automation.PSTypeName]'WindowPhysics.Utils').Type) {
-    Add-Type -TypeDefinition $code -ReferencedAssemblies System.Drawing, System.Windows.Forms
-}
-
-Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
-# --- 2. НАСТРОЙКИ ФИЗИКИ ---
-$gravity = 0.8          # Гравитация
-$friction = 0.98        # Трение воздуха
-$wallBounce = 0.7       # Упругость стен
-$windowBounce = 0.85    # Упругость окон друг об друга
-$winStates = @{}        # Хранилище данных окон
-$SWP_FLAGS = 0x0001 -bor 0x0004 -bor 0x0010 -bor 0x4000 # ASYNCWINDOWPOS (чтобы не висло)
-$workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea # Учитываем панель задач
-$lastScan = 0
+$code = @"
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Diagnostics;
+using System.Windows.Forms;
+using System.Drawing;
+using System.Linq;
 
-# Переменные для диагностики
-$frameCount = 0
-$lastDebugTime = [Environment]::TickCount
-$perfScan = 0
-$perfPhysics = 0
-$perfCollision = 0
+public static class PhysicsEngine
+{
+    // --- WINAPI ---
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
 
-# --- 3. ФУНКЦИЯ ПОЛУЧЕНИЯ ДАННЫХ ---
-function Get-WindowData($hwnd) {
-    $rect = New-Object WindowPhysics.Utils+RECT
-    [void][WindowPhysics.Utils]::GetWindowRect($hwnd, [ref]$rect)
-    $w = $rect.Right - $rect.Left; $h = $rect.Bottom - $rect.Top
-    
-    # Игнорируем слишком мелкие объекты
-    if ($w -le 50 -or $h -le 50) { return $null }
-    
-    try {
-        $bmp = New-Object System.Drawing.Bitmap($w, $h)
-        $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
-        $g.Dispose()
-        
-        # Расчет массы через C#
-        $mass = [WindowPhysics.Utils]::CalculateMass($bmp, 50, 50)
-        $bmp.Dispose()
-        return @{ mass = $mass; w = $w; h = $h; rect = $rect }
-    } catch {
-        return @{ mass = 50; w = $w; h = $h; rect = $rect }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    // --- STATE ---
+    private class WindowState {
+        public IntPtr Hwnd;
+        public float VX, VY;
+        public int Width, Height;
+        public int LastX, LastY;
+        public bool IsBeingDragged; // <--- ВОТ ТВОЕ СПАСЕНИЕ
+        public bool IsSleeping; 
     }
-}
 
-Clear-Host
-Write-Host "Physics Engine Started." -ForegroundColor Cyan
-Write-Host "Press ESC to exit." -ForegroundColor Gray
-
-# --- 4. ГЛАВНЫЙ ЦИКЛ ---
-while($true) {
-    # Выход
-    if ([WindowPhysics.Utils]::GetAsyncKeyState(0x1B) -ne 0) { break }
+    private static float Gravity = 1.5f;   
+    private static float Friction = 0.92f;  
+    private static float Bounce = 0.5f;     
     
-    # Состояние мыши
-    $isMouseDown = [WindowPhysics.Utils]::GetAsyncKeyState(0x01) -ne 0
-    
-    # --- СКАНИРОВАНИЕ ОКОН (Тайминг T1) ---
-    $t1 = [Environment]::TickCount
-    if ([Environment]::TickCount -gt $lastScan + 2000) { 
-        $cachedWindows = [System.Diagnostics.Process]::GetProcesses() | Where-Object { $_.MainWindowHandle -ne 0 }
-        $lastScan = [Environment]::TickCount 
-    }
-    $activeIds = @()
-    $perfScan = [Environment]::TickCount - $t1
+    private static ConcurrentDictionary<IntPtr, WindowState> _windows = new ConcurrentDictionary<IntPtr, WindowState>();
+    private static bool _running = true;
 
-    # --- ФИЗИКА (Тайминг T2) ---
-    $t2 = [Environment]::TickCount
-    foreach ($p in $cachedWindows) {
-        try {
-            $hwnd = $p.MainWindowHandle; if ($hwnd -eq 0) { continue }
-            $id = $hwnd.ToString()
+    // ФЛАГИ: ASYNC | NOZORDER | NOACTIVATE | NOSIZE
+    private const uint SWP_FLAGS = 0x4015; 
+
+    public static void StartChaos()
+    {
+        SetProcessDPIAware(); 
+
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine(">>> PHYSICS ENGINE: DRAG & DROP UPGRADE <<<");
+        Console.WriteLine(">>> HOLD 'END' TO EXIT <<<");
+        Console.ResetColor();
+
+        long lastScanTime = 0;
+        Screen[] cachedScreens = Screen.AllScreens;
+
+        while (_running)
+        {
+            if ((GetAsyncKeyState(0x23) & 0x8000) != 0) { _running = false; break; }
+
+            long now = DateTime.Now.Ticks / 10000;
+            if (now - lastScanTime > 1500) {
+                ScanWindows();
+                cachedScreens = Screen.AllScreens; 
+                lastScanTime = now;
+            }
+
+            UpdatePhysicsParallel(cachedScreens); 
             
-            # Получаем координаты
-            $rect = New-Object WindowPhysics.Utils+RECT
-            [void][WindowPhysics.Utils]::GetWindowRect($hwnd, [ref]$rect)
-            $w = $rect.Right - $rect.Left; $h = $rect.Bottom - $rect.Top
-            if ($w -lt 50 -or $h -lt 50) { continue }
-            $activeIds += $id
+            Thread.Sleep(12); // ~80 FPS
+        }
+    }
 
-            # Регистрация нового окна
-            if (-not $winStates.ContainsKey($id)) { 
-                $data = Get-WindowData $hwnd
-                if ($data) {
-                    # Получаем заголовок окна для отображения
-                    $title = $p.MainWindowTitle
-                    if ([string]::IsNullOrEmpty($title)) { $title = $p.ProcessName }
-                    
-                    $winStates[$id] = @{ 
-                        title=$title;
-                        vx=0; vy=0; oldX=$rect.Left; oldY=$rect.Top; 
-                        isFlying=$false; mass=$data.mass; w=$data.w; h=$data.h 
+    private static void ScanWindows()
+    {
+        Process[] procs = Process.GetProcesses();
+        Parallel.ForEach(procs, p => {
+            IntPtr h = p.MainWindowHandle;
+            if (h == IntPtr.Zero) return;
+            
+            if (!_windows.ContainsKey(h)) {
+                if (IsWindowVisible(h)) {
+                    RECT r;
+                    if (GetWindowRect(h, out r)) {
+                        int w = r.Right - r.Left;
+                        int h_val = r.Bottom - r.Top;
+                        
+                        if (w > 100 && h_val > 100) {
+                            _windows.TryAdd(h, new WindowState {
+                                Hwnd = h,
+                                VX = 0, VY = 5.0f,
+                                Width = w, Height = h_val,
+                                LastX = r.Left, LastY = r.Top,
+                                IsSleeping = false,
+                                IsBeingDragged = false
+                            });
+                        }
                     }
-                } else { continue }
-            }
-            $state = $winStates[$id]; $state.w = $w; $state.h = $h
-
-            # Перетаскивание мышкой
-            if ($rect.Left -ne $state.oldX -or $rect.Top -ne $state.oldY) { 
-                if ($isMouseDown) { 
-                    $state.vx = ($rect.Left - $state.oldX) * 2.2; $state.vy = ($rect.Top - $state.oldY) * 2.2; $state.isFlying = $true 
-                } 
-            }
-
-            # Расчет полета
-            if ($state.isFlying -and -not $isMouseDown) {
-                $state.vy += $gravity; $state.vx *= $friction; $state.vy *= $friction
-                $nx = $rect.Left + $state.vx; $ny = $rect.Top + $state.vy
-
-                # Столкновения со стенами
-                if ($nx -le 0 -or $nx -ge ($workArea.Width - $w)) { 
-                    $state.vx *= -$wallBounce; $nx = [Math]::Max(0, [Math]::Min($nx, $workArea.Width - $w)) 
                 }
-                if ($ny -le 0 -or $ny -ge ($workArea.Height - $h)) { 
-                    $state.vy *= -$wallBounce; $ny = [Math]::Max(0, [Math]::Min($ny, $workArea.Height - $h)) 
-                }
-                
-                # Остановка
-                if ([Math]::Abs($state.vx) -lt 0.5 -and [Math]::Abs($state.vy) -lt 1 -and $ny -ge ($workArea.Height - $h - 10)) { 
-                    $state.isFlying = $false 
-                }
-                
-                [void][WindowPhysics.Utils]::SetWindowPos($hwnd, 0, [int]$nx, [int]$ny, 0, 0, $SWP_FLAGS)
-                $state.oldX = [int]$nx; $state.oldY = [int]$ny
-            } else { $state.oldX = $rect.Left; $state.oldY = $rect.Top }
-        } catch { continue }
-    }
-    $perfPhysics = [Environment]::TickCount - $t2
-
-    # --- СТОЛКНОВЕНИЯ ОКОН (Тайминг T3) ---
-    $t3 = [Environment]::TickCount
-    for ($i = 0; $i -lt $activeIds.Count; $i++) {
-        for ($j = $i + 1; $j -lt $activeIds.Count; $j++) {
-            $sA = $winStates[$activeIds[$i]]; $sB = $winStates[$activeIds[$j]]
-            if (-not $sA -or -not $sB) { continue }
-            
-            # Проверка пересечения (AABB)
-            if ($sA.oldX -lt ($sB.oldX + $sB.w) -and ($sA.oldX + $sA.w) -gt $sB.oldX -and 
-                $sA.oldY -lt ($sB.oldY + $sB.h) -and ($sA.oldY + $sA.h) -gt $sB.oldY) {
-                
-                $m1 = $sA.mass; $m2 = $sB.mass
-                
-                # Формула упругого удара
-                $newVxA = ($sA.vx * ($m1 - $m2) + (2 * $m2 * $sB.vx)) / ($m1 + $m2)
-                $newVyA = ($sA.vy * ($m1 - $m2) + (2 * $m2 * $sB.vy)) / ($m1 + $m2)
-                $newVxB = ($sB.vx * ($m2 - $m1) + (2 * $m1 * $sA.vx)) / ($m1 + $m2)
-                $newVyB = ($sB.vy * ($m2 - $m1) + (2 * $m1 * $sA.vy)) / ($m1 + $m2)
-                
-                $sA.vx = $newVxA * $windowBounce; $sA.vy = $newVyA * $windowBounce
-                $sB.vx = $newVxB * $windowBounce; $sB.vy = $newVyB * $windowBounce
-                $sA.isFlying = $true; $sB.isFlying = $true
-                
-                # Анти-залипание (раздвигаем окна)
-                if ($sA.oldX -lt $sB.oldX) { $sA.oldX -= 4; $sB.oldX += 4 } else { $sA.oldX += 4; $sB.oldX -= 4 }
-                if ($sA.oldY -lt $sB.oldY) { $sA.oldY -= 4; $sB.oldY += 4 } else { $sA.oldY += 4; $sB.oldY -= 4 }
             }
-        }
-    }
-    $perfCollision = [Environment]::TickCount - $t3
-
-    # --- ВЫВОД В КОНСОЛЬ (1 раз в сек) ---
-    $frameCount++
-    if ([Environment]::TickCount -gt $lastDebugTime + 1000) {
-        $fps = $frameCount
-        $frameCount = 0
-        $lastDebugTime = [Environment]::TickCount
-        
-        Clear-Host
-        Write-Host "=== PHYSICS ENGINE MONITOR ===" -ForegroundColor Yellow
-        Write-Host "FPS: $fps" -ForegroundColor Cyan
-        Write-Host "Timings: Scan(${perfScan}ms) | Physics(${perfPhysics}ms) | Collision(${perfCollision}ms)" -ForegroundColor Gray
-        
-        Write-Host "`n=== HEAVY WINDOWS (Sorted by Mass) ===" -ForegroundColor Yellow
-        Write-Host "WINDOW NAME              | MASS   | STATUS " -ForegroundColor DarkGray
-        Write-Host "-------------------------------------------" -ForegroundColor DarkGray
-        
-        # Сортировка и вывод
-        $sortedWindows = $winStates.Values | Sort-Object -Property mass -Descending | Select-Object -First 15
-        foreach ($w in $sortedWindows) {
-            # Обрезаем длинные названия
-            $displayTitle = $w.title
-            if ($displayTitle.Length -gt 23) { $displayTitle = $displayTitle.Substring(0, 20) + "..." }
-            
-            $status = if ($w.isFlying) { "FLYING" } else { "STATIC" }
-            $massStr = "{0:N0}" -f $w.mass
-            
-            # Цветовая кодировка веса
-            $color = if ($w.mass -gt 200) { "Red" } elseif ($w.mass -lt 50) { "Green" } else { "White" }
-            
-            Write-Host ("{0,-24} | {1,-6} | {2}" -f $displayTitle, $massStr, $status) -ForegroundColor $color
-        }
-        Write-Host "-------------------------------------------" -ForegroundColor DarkGray
-        Write-Host "Total Windows: $($winStates.Count)"
+        });
     }
 
-    [System.Threading.Thread]::Sleep(10) # 100 FPS cap
+    private static void UpdatePhysicsParallel(Screen[] screens)
+    {
+        bool isMouseDown = (GetAsyncKeyState(0x01) & 0x8000) != 0;
+        
+        Parallel.ForEach(_windows, kvp => {
+            var s = kvp.Value;
+            IntPtr hwnd = s.Hwnd;
+
+            if (!IsWindow(hwnd)) { 
+                WindowState dummy;
+                _windows.TryRemove(hwnd, out dummy); 
+                return; 
+            }
+
+            RECT r;
+            if (!GetWindowRect(hwnd, out r)) return;
+
+            int currentX = r.Left;
+            int currentY = r.Top;
+
+            // --- ЛОГИКА ЗАХВАТА ---
+            if (isMouseDown) {
+                // Если окно сдвинулось (значит юзер его потянул) ИЛИ оно уже было в захвате
+                if (Math.Abs(currentX - s.LastX) > 5 || Math.Abs(currentY - s.LastY) > 5 || s.IsBeingDragged) {
+                    
+                    s.IsBeingDragged = true;  // ВКЛЮЧАЕМ РЕЖИМ ЗАХВАТА
+                    s.IsSleeping = false;     // БУДИМ ЕГО
+
+                    // Считаем скорость "броска" (инерция)
+                    s.VX = (currentX - s.LastX) * 0.7f; 
+                    s.VY = (currentY - s.LastY) * 0.7f;
+                    
+                    // Обновляем позицию и ВЫХОДИМ. НИКАКОЙ ГРАВИТАЦИИ.
+                    s.LastX = currentX;
+                    s.LastY = currentY;
+                    return; 
+                }
+            } else {
+                // Кнопку отпустили - выключаем захват
+                s.IsBeingDragged = false;
+            }
+
+            // ЕСЛИ СПИТ - ПРОПУСКАЕМ
+            if (s.IsSleeping) {
+                s.LastX = currentX; s.LastY = currentY;
+                return;
+            }
+
+            // --- ДАЛЬШЕ ИДЕТ ФИЗИКА (ТОЛЬКО ЕСЛИ НЕ ДЕРЖИШЬ РУКАМИ) ---
+            
+            int centerX = currentX + (s.Width / 2);
+            int centerY = currentY + (s.Height / 2);
+            
+            Rectangle workArea = new Rectangle(0,0, 1920, 1080);
+            bool foundScreen = false;
+            foreach(var scr in screens) {
+                if (scr.Bounds.Contains(centerX, centerY)) {
+                    workArea = scr.WorkingArea;
+                    foundScreen = true;
+                    break;
+                }
+            }
+            if (!foundScreen && screens.Length > 0) workArea = screens[0].WorkingArea;
+
+            // Гравитация
+            s.VY += Gravity;
+            s.VX *= Friction;
+            s.VY *= Friction;
+
+            float newX = currentX + s.VX;
+            float newY = currentY + s.VY;
+
+            // Пол
+            if (newY + s.Height >= workArea.Bottom) {
+                newY = workArea.Bottom - s.Height;
+                s.VY = -s.VY * Bounce;
+            }
+            // Потолок
+            if (newY <= workArea.Top) {
+                newY = workArea.Top;
+                s.VY = -s.VY * 0.5f;
+            }
+            // Стены
+            if (newX <= workArea.Left) {
+                newX = workArea.Left;
+                s.VX = -s.VX * Bounce;
+            }
+            if (newX + s.Width >= workArea.Right) {
+                newX = workArea.Right - s.Width;
+                s.VX = -s.VX * Bounce;
+            }
+
+            // Усыпление (оптимизация)
+            if (Math.Abs(s.VX) < 0.2f && Math.Abs(s.VY) < 0.5f && (newY + s.Height >= workArea.Bottom - 5)) {
+                s.IsSleeping = true;
+                s.VX = 0; s.VY = 0;
+            }
+
+            if (!s.IsSleeping) {
+                if ((int)newX != currentX || (int)newY != currentY) {
+                    SetWindowPos(hwnd, IntPtr.Zero, (int)newX, (int)newY, 0, 0, SWP_FLAGS);
+                    s.LastX = (int)newX;
+                    s.LastY = (int)newY;
+                }
+            }
+        });
+    }
 }
+"@
+
+if (-not ([System.Management.Automation.PSTypeName]'PhysicsEngine').Type) {
+    Add-Type -TypeDefinition $code -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Core
+}
+
+[PhysicsEngine]::StartChaos()
